@@ -1,5 +1,7 @@
 library(baseballr)
 library(tidyverse)
+library(mvtnorm)
+library(glmnet)
 library(patchwork)
 library(stringr)
 theme_set(theme_bw())
@@ -145,7 +147,7 @@ df <- as.data.frame(df)
 
 # Saving time by scraping if code crashes
 # write_csv(df, "2021_statcast_pitch.csv")
- # df <- read_csv("baseball/data/2021_statcast_pitch.csv")
+df <- read_csv("baseball/data/2021_statcast_pitch.csv")
 
 # Get IDs, clean names, drop deprecated columns
 people <- read_csv("https://raw.githubusercontent.com/chadwickbureau/register/master/data/people.csv")
@@ -553,8 +555,7 @@ SL_features <- feature_selection(sl_data)
 
 cb_data <- season_mlb5%>%
   filter(pitch_type %in% c("CU", "KC"))
-
-CB_features = feature_selection(cb_data)
+CB_features <- feature_selection(cb_data)
 
 # Test/Train
 
@@ -565,7 +566,6 @@ ch_w_preds_val <- validate(ch_data, CH_features)
 sl_w_preds_val <- validate(sl_data, SL_features)
 cb_w_preds_val <- validate(cb_data, CB_features)
 
-# Evaluating feature importance and accessing individual models sample code
 importance(ff_data_models_val$my_model[[1]])
 varImpPlot(ff_data_models_val$my_model[[1]])
 ff_data_models_val$my_model[1]
@@ -689,7 +689,6 @@ p <- ggplot(plot, aes(x=plate_x, y=plate_z, weight=x_rv)) +
   geom_segment(aes(x = 0.85, y = 1.6, xend = 0.85, yend = 3.5)) +
   scale_fill_gradient2(low = "blue", high = "red", space = "Lab", midpoint = 0) +
   xlab("Plate X (Catcher's Perspective)") +
-  ylab("Plate Y") +
   labs(title = "Overall xRun Value by Pitch Location (2021)")
 
 p1 <- ggplot(plot, aes(x=plate_x, y=plate_z, weight=rv)) +
@@ -700,7 +699,6 @@ p1 <- ggplot(plot, aes(x=plate_x, y=plate_z, weight=rv)) +
   geom_segment(aes(x = 0.85, y = 1.6, xend = 0.85, yend = 3.5)) +
   scale_fill_gradient2(low = "blue", high = "red", space = "Lab", midpoint = 0) +
   xlab("Plate X (Catcher's Perspective)") +
-  ylab("Plate Y") +
   labs(title = "Overall Run Value by Pitch Location (2021)")
 
 p + p1
@@ -715,7 +713,6 @@ cb1 <- ggplot(cb_fc, aes(x=plate_x, y=plate_z, weight=x_rv)) +
   scale_y_continuous(limits = c(0, 4)) +
   scale_fill_gradient2(low = "blue", high = "red", space = "Lab", midpoint = 0) +
   xlab("Plate X (Catcher's Perspective)") +
-  ylab("Plate Y") +
   labs(title = "Corbin Burnes, FC (Expected RV, 2021)")
 
 cb2 <- ggplot(cb_cb, aes(x=plate_x, y=plate_z, weight=x_rv), xlim=c(-2.5, 2.5), ylim=c(0,4.5)) +
@@ -728,7 +725,6 @@ cb2 <- ggplot(cb_cb, aes(x=plate_x, y=plate_z, weight=x_rv), xlim=c(-2.5, 2.5), 
   scale_y_continuous(limits = c(0, 4)) +
   scale_fill_gradient2(low = "blue", high = "red", space = "Lab", midpoint = 0) +
   xlab("Plate X (Catcher's Perspective)") +
-  ylab("Plate Y") +
   labs(title = "Corbin Burnes, CU (Expected RV, 2021)")
 
 patchwork <- (cb1 + cb2)
@@ -757,7 +753,6 @@ dr2 <- ggplot(dr_sl, aes(x=plate_x, y=plate_z, weight=x_rv), xlim=c(-2.5, 2.5), 
   scale_y_continuous(limits = c(0, 4)) +
   scale_fill_gradient2(low = "blue", high = "red", space = "Lab", midpoint = 0) +
   xlab("Plate X (Catcher's Perspective)") +
-  ylab("Plate Y") +
   labs(title = "Drew Rasmussen, SL (Expected RV, 2021)")
 
 drewras <- (dr1 + dr2)
