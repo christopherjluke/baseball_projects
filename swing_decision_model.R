@@ -1,4 +1,3 @@
-library(baseballr)
 library(tidyverse)
 library(DBI)
 library(RMySQL)
