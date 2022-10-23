@@ -1,3 +1,4 @@
+library(baseballr)
 library(tidyverse)
 library(DBI)
 library(RMySQL)
@@ -9,12 +10,12 @@ library(ParBayesianOptimization)
 
 statcast_db <- DBI::dbConnect(RMySQL::MySQL(),
                               dbname = "statcast",
-                              user = <username>,
-                              password = <password>,
+                              user = "<username>",
+                              password = "<password>",
                               host = "localhost",
                               port = 5432)
 
-# Data pulled from SQL database, but baseballr Statcast function can work too.
+
 df1 <- dbGetQuery(statcast_db, "SELECT * FROM statcast WHERE game_year = '2019'")
 df2 <- dbGetQuery(statcast_db, "SELECT * FROM statcast WHERE game_year = '2020'")
 df3 <- dbGetQuery(statcast_db, "SELECT * FROM statcast WHERE game_year = '2021'")
@@ -49,6 +50,8 @@ swingdata <- rawdata %>%
          !is.na(p_throws))%>% 
   select(outcome, plate_x, plate_z, pfx_x, pfx_z, release_speed, stand)%>%
   mutate(outcome = outcome - 1)
+
+
 
 run_value <- rawdata %>%
   filter(description != "ball" & description != "called_strike" & description != "blocked_ball" & description != "pitchout" & description != "hit_by_pitch")%>% 
@@ -92,11 +95,11 @@ swing_sample <- sample.split(swingdata.1$outcome, SplitRatio = .75)
 swing_train <- subset(swingdata.1, swing_sample == TRUE)
 swing_test <- subset(swingdata.1, swing_sample == FALSE)
 
-x_data <- swing_train %>%
+x_data_train <- swing_train %>%
   select(-outcome) %>%
   as.matrix()
 
-y_data <- swing_train %>%
+y_data_train <- swing_train %>%
   pull(outcome)
 
 x_data_test <- swing_test %>%
@@ -107,12 +110,13 @@ y_data_test <- swing_test %>%
   pull(outcome)
 
 set.seed(27)
-folds <- list(fold1 = as.integer(seq(1, nrow(x_data), by=3)),
-              fold2 = as.integer(seq(2, nrow(x_data), by=3)),
-              fold3 = as.integer(seq(3, nrow(x_data), by=3)),
-              fold4 = as.integer(seq(4, nrow(x_data), by=3)),
-              fold5 = as.integer(seq(5, nrow(x_data), by=3)))
-obj_func <- function(max_depth, min_child_weight, subsample, colsample_bytree) {
+folds <- list(fold1 = as.integer(seq(1, nrow(x_data_test), by=3)),
+              fold2 = as.integer(seq(2, nrow(x_data_test), by=3)),
+              fold3 = as.integer(seq(3, nrow(x_data_test), by=3)),
+              fold4 = as.integer(seq(4, nrow(x_data_test), by=3)),
+              fold5 = as.integer(seq(5, nrow(x_data_test), by=3)))
+
+scoringFunction <- function(max_depth, min_child_weight, subsample, colsample_bytree) {
   
   params <- list(
     eta = 0.1,
@@ -121,23 +125,22 @@ obj_func <- function(max_depth, min_child_weight, subsample, colsample_bytree) {
     min_child_weight = min_child_weight,
     subsample = subsample,
     colsample_bytree = colsample_bytree,
-    
     booster = "gbtree",
     objective = "multi:softprob",
-    eval_metric = "merror")
+    eval_metric = "auc")
   
   xgbcv <- xgb.cv(params = params,
-                  data = x_data,
-                  label = y_data,
-                  nround = 150,
+                  data = x_data_train,
+                  label = y_data_train,
+                  nround = 100,
                   folds = folds,
                   prediction = TRUE,
-                  early_stopping_rounds = 25,
+                  early_stopping_rounds = 5,
                   verbose = 1,
-                  maximize = F)
+                  maximize = TRUE)
   
   list <- list(
-    Score = -min(xgbcv$evaluation_log$test_merror_mean),
+    Score = max(xgbcv$evaluation_log$test_auc_mean),
     nrounds = xgbcv$best_iteration
   )
   
@@ -151,35 +154,37 @@ bounds <- list(max_depth = c(1L, 10L),
 
 set.seed(33)
 
-bayes_opt <- bayesOpt(FUN = obj_func, bounds = bounds, initPoints = length(bounds) + 6, iters.n = 15,
+bayes_opt <- bayesOpt(FUN = scoringFunction, bounds = bounds, initPoints = length(bounds) + 6, iters.n = 10,
                       plotProgress = TRUE)
 
 bayes_opt$scoreSummary
 data.frame(getBestPars(bayes_opt))
 
-params <- list(booster = "gbtree", num_class = 7, eval_metric = "merror",
-               eta = 0.1, objective = "multi:softprob", max_depth = 10,
-               min_child_weight = 3, subsample = 0.7086962, colsample_bytree = 0.9089091)
+params <- list(booster = "gbtree", num_class = 7, eval_metric = "auc", eta = 0.1, objective = "multi:softprob", 
+               max_depth = 10, min_child_weight = 3, subsample = 0.8070015, colsample_bytree = 0.6534303)
 
-xgb.train <- xgb.DMatrix(data = x_data, label = y_data)
+xgb.train <- xgb.DMatrix(data = x_data_train, label = y_data_train)
 xgb.test <- xgb.DMatrix(data = x_data_test, label = y_data_test)
 
 xgbcv <- xgb.cv(params = params, data = xgb.train, nrounds = 250, nfold = 7, showsd = TRUE,
-                stratified = TRUE, print_every_n = 3, early_stopping_rounds = 20, maximize = FALSE)
+                stratified = TRUE, print_every_n = 3, prediction = TRUE, early_stopping_rounds = 20, maximize = TRUE)
 
-print(xgbcv$best_iteration)
-
-swings_xgb <- xgb.train(data = xgb.train, params = params, nrounds = 45,
+     
+swings_xgb <- xgb.train(data = xgb.train, params = params, nrounds = 91,
                         watchlist = list(val = xgb.test, train = xgb.train))
 
-pred_y = predict(swings_xgb, xgb.test)
-mse = mean((y_data_test - pred_y)^2)
-mae = caret::MAE(y_data_test, pred_y)
-rmse = caret::RMSE(y_data_test, pred_y)
 
-cat("MSE: ", mse, "MAE: ", mae, " RMSE: ", rmse)
+e <- data.frame(swings_xgb$evaluation_log)
+plot(e$iter, e$train_auc, col='blue')
+lines(e$iter, e$val_auc, col='red')
 
+importance_matrix <- xgb.importance(model = swings_xgb)
+print(importance_matrix)
+xgb.plot.importance(importance_matrix = importance_matrix)
+
+swings_xgb <- readRDS("swings_xgb.rds")
 saveRDS(swings_xgb, "swings_xgb.rds")
+
 
 library(mgcv)
 
@@ -198,8 +203,10 @@ takes_right <- takes %>%
 cs_gam_left <- gam(strike ~ s(plate_x, plate_z), data=takes_left, family=binomial())
 cs_gam_right <- gam(strike ~ s(plate_x, plate_z), data=takes_right, family=binomial())
 
+
 saveRDS(cs_gam_left, "cs_gam_left.rds")
 saveRDS(cs_gam_right, "cs_gam_right.rds")
+
 
 sd_rv <- function(swing_model, cs_mod_l, cs_mod_r, df){
   library(caret)
@@ -285,6 +292,15 @@ df2022 <-dbGetQuery(statcast_db, "SELECT * FROM statcast WHERE game_year = '2022
 df2022 <- df2022 %>%
   filter(game_date >= "2022-04-07" & game_date <= "2022-10-5")
 
+people <- read_csv("https://raw.githubusercontent.com/chadwickbureau/register/master/data/people.csv")
+
+mlbam_bat <- people %>%
+  mutate(batter_name = paste(name_first, name_last)) %>%
+  select(batter_name, key_mlbam)
+names(mlbam_bat)[names(mlbam_bat) == 'key_mlbam'] <- 'batter'
+
+df2022 <- right_join(df2022, mlbam_bat, by ="batter")
+
 sd_rv22 <- sd_rv(swings_xgb, cs_gam_left, cs_gam_right, df2022)
 
 topKzone = 3.5
@@ -293,6 +309,18 @@ inKzone = -.95
 outKzone = 0.95
 kZone = data.frame(x = c(inKzone, inKzone, outKzone, outKzone, inKzone),
                    y = c(botKzone, topKzone, topKzone, botKzone, botKzone))
+
+sd_rv22 %>%
+  select(batter_name, sd_plus) %>%
+  group_by(batter_name) %>%
+  summarize(pitches = n(),
+            sd_plus = mean(sd_plus)) %>%
+  filter(pitches >=500) %>%
+  arrange((desc(sd_plus)))
+
+sd_rv22 %>%
+  arrange(sd_plus)
+
 
 sd_rv22%>%
   mutate(swing_new = ifelse(swing == 1, "Yes", "No"))%>%
@@ -306,45 +334,22 @@ sd_rv22%>%
   theme_bw()+
   labs(shape = "Swing",
        color = "Swing Decision+",
-       x = "Plate X",
-       y = "Plate Z",
+       x = "plate_x",
+       y = "plate_z",
        title = "Swing Decisions Model, 2022")
 
-df2021 <- dbGetQuery(statcast_db, "SELECT * FROM statcast WHERE game_year = '2021'")
+df2021 <-dbGetQuery(statcast_db, "SELECT * FROM statcast WHERE game_year = '2021'")
 
 df2021 <- df2021 %>%
   filter(game_date >= "2021-04-01" & game_date <= "2021-10-03")
 
+df2021 <- right_join(df2021, mlbam_bat, by ="batter")
+
 sd_rv21 <- sd_rv(swings_xgb, cs_gam_left, cs_gam_right, df2021)
 
-xbh21 <- sd_rv21%>%
-  mutate(p_xbh = V4 + V5 + V6)%>%
-  filter(swing == 1)%>%
-  group_by(player_name, batter)%>%
-  summarize(n = n(), avg = mean(p_xbh)*100)%>%
-  filter(n >= 500)%>%
-  arrange(desc(avg))%>%
-  ungroup()
 
-acuna <- sd_rv22%>%
-  mutate(p_xbh = V4 + V5 + V6)%>%
-  filter(swing == 1)%>%
-  filter(batter == 0660670) %>%
-  summarize(n = n(), avg = mean(p_xbh)*100)%>%
-  arrange(desc(avg))%>%
-  ungroup()
-
-xbh22 <- sd_rv22%>%
-  mutate(p_xbh = V4 + V5 + V6)%>%
-  filter(swing == 1)%>%
-  group_by(player_name, batter)%>%
-  summarize(n_22 = n(), avg_22 = mean(p_xbh)*100)%>%
-  filter(n_22 >= 250)%>%
-  arrange(desc(avg_22))%>%
-  ungroup()
-
-sd_rv21%>%
-  filter(player_name == "Ohtani, Shohei")%>%
+p1 <- sd_rv21%>%
+  filter(batter_name == "Alex Bregman")%>%
   mutate(p_xbh = V4 + V5 + V6)%>%
   filter(swing == 1)%>%
   ggplot(aes(plate_x, plate_z))+
@@ -356,15 +361,14 @@ sd_rv21%>%
   ylim(-1, 4.5)+
   theme_bw()+
   coord_fixed()+
-  annotate(geom = "text", x = -1, y = -.75, label = "Mean p(XBH): 6.01%%")+
-  labs(title = "Shohei Ohtani Swings, 2021",
-       x = "Plate X",
-       y = "Plate Z",
-       color = "p(XBH)",
-       subtitle = "Probabilities generated with pitch location, \nspeed, movement, and batter hand")
+  annotate(geom = "text", x = .25, y = -.75, label = "p(XBH): 5.63%")+
+  labs(title = "Alex Bregman Swings, 2021",
+       x = "plate_x",
+       y = "plate_z",
+       color = "p(XBH)")
 
-sd_rv22%>%
-  filter(player_name == "Ohtani, Shohei")%>%
+p2 <- sd_rv22%>%
+  filter(batter_name == "Alex Bregman")%>%
   mutate(p_xbh = V4 + V5 + V6)%>%
   filter(swing == 1)%>%
   ggplot(aes(plate_x, plate_z))+
@@ -376,15 +380,14 @@ sd_rv22%>%
   ylim(-1, 4.5)+
   theme_bw()+
   coord_fixed()+
-  annotate(geom = "text", x = -1, y = -.75, label = "Mean p(XBH): 6.28%")+
-  labs(title = "Shohei Ohtani Swings, 2022",
-       x = "Plate X",
-       y = "Plate Z",
-       color = "p(XBH)",
-       subtitle = "Probabilities generated with pitch location, \nspeed, movement, and batter hand")
+  annotate(geom = "text", x = .25, y = -.75, label = "p(XBH): 5.42%")+
+  labs(title = "Alex Bregman Swings, 2022",
+       x = "plate_x",
+       y = "plate_z",
+       color = "p(XBH)")
 
-sd_rv21%>%
-  filter(batter == "660670")%>%
+p3 <- sd_rv21%>%
+  filter(batter_name == "Javier Baez")%>%
   mutate(p_xbh = V4 + V5 + V6)%>%
   filter(swing == 1)%>%
   ggplot(aes(plate_x, plate_z))+
@@ -396,15 +399,14 @@ sd_rv21%>%
   ylim(-1, 4.5)+
   theme_bw()+
   coord_fixed()+
-  annotate(geom = "text", x = -1, y = -.75, label = "Mean p(XBH): 6.87%")+
-  labs(title = "Ronald Acuña Jr. Swings, 2021",
-       x = "Plate X",
-       y = "Plate Z",
-       color = "p(XBH)",
-       subtitle = "Probabilities based on pitch location, \nspeed, movement, and batter hand")
+  annotate(geom = "text", x = .25, y = -.75, label = "p(XBH): 4.97%")+
+  labs(title = "Javier Báez Swings, 2021",
+       x = "plate_x",
+       y = "plate_z",
+       color = "p(XBH)")
 
-sd_rv22%>%
-  filter(batter == "660670")%>%
+p4 <- sd_rv22%>%
+  filter(batter_name == "Javier Baez")%>%
   mutate(p_xbh = V4 + V5 + V6)%>%
   filter(swing == 1)%>%
   ggplot(aes(plate_x, plate_z))+
@@ -416,10 +418,13 @@ sd_rv22%>%
   ylim(-1, 4.5)+
   theme_bw()+
   coord_fixed()+
-  annotate(geom = "text", x = -1, y = -.75, label = "Mean p(XBH): 6.51%")+
-  labs(title = "Ronald Acuña Jr. Swings, 2022",
-       x = "Plate X",
-       y = "Plate Z",
-       color = "p(XBH)",
-       subtitle = "Probabilities based on pitch location, \nspeed, movement, and batter hand")
+  annotate(geom = "text", x = .25, y = -.75, label = "p(XBH): 4.93%")+
+  labs(title = "Javier Báez Swings, 2022",
+       x = "plate_x",
+       y = "plate_z",
+       color = "p(XBH)")
 
+library(patchwork)
+
+patchwork <- (p1+p2+p3+p4)
+patchwork + plot_annotation(caption = "Swing-Decison Model probabilities based on pitch location,\n release speed, and batter handedness")
